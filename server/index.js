@@ -35,6 +35,7 @@ import session from 'express-session';
 import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
 import Stripe from 'stripe';
+import { getSubscriptionPeriodEnd, getInvoiceSubscription } from './stripe-subscription-period.js';
 
 dotenv.config();
 
@@ -44,7 +45,7 @@ const stripeSecretKey = process.env.NODE_ENV === 'production'
   : process.env.STRIPE_TEST_SECRET_KEY;
 
 const stripe = stripeSecretKey
-  ? new Stripe(stripeSecretKey, { apiVersion: '2023-10-16' })
+  ? new Stripe(stripeSecretKey, { apiVersion: '2026-09-30.endive' })
   : null;
 
 const backendUrl = process.env.NODE_ENV === 'production' ? process.env.API_BASE_URL : 'http://localhost:3000';
@@ -98,7 +99,7 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
         stripe_subscription_id: subscription.id,
         stripe_price_id: subscription.items.data[0].price.id,
         stripe_subscription_status: subscription.status,
-        stripe_current_period_end: new Date(subscription.current_period_end * 1000),
+        stripe_current_period_end: new Date((getSubscriptionPeriodEnd(subscription, (items) => items[0])) * 1000),
       };
 
       // Handle scheduled cancellation
@@ -108,7 +109,7 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
           .from('user_subscriptions')
           .update({
             stripe_subscription_status: 'scheduled_for_cancellation',
-            stripe_current_period_end: new Date(subscription.current_period_end * 1000),
+            stripe_current_period_end: new Date((getSubscriptionPeriodEnd(subscription, (items) => items[0])) * 1000),
           })
           .eq('stripe_subscription_id', subscription.id);
         if (updateError) {
@@ -125,7 +126,7 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
           .from('user_subscriptions')
           .update({
             stripe_subscription_status: subscription.status,
-            stripe_current_period_end: new Date(subscription.current_period_end * 1000),
+            stripe_current_period_end: new Date((getSubscriptionPeriodEnd(subscription, (items) => items[0])) * 1000),
           })
           .eq('stripe_subscription_id', subscription.id);
         if (updateError) {
@@ -185,9 +186,9 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
     }
     case 'invoice.payment_succeeded': {
       const invoice = event.data.object;
-      if (invoice.billing_reason === 'subscription_cycle' && invoice.subscription) {
-        console.log(`✅ Handling invoice.payment_succeeded for subscription: ${invoice.subscription}`);
-        await manageSubscriptionChange(invoice.subscription);
+      if (invoice.billing_reason === 'subscription_cycle' && (getInvoiceSubscription(invoice))) {
+        console.log(`✅ Handling invoice.payment_succeeded for subscription: ${(getInvoiceSubscription(invoice))}`);
+        await manageSubscriptionChange((getInvoiceSubscription(invoice)));
       }
       break;
     }
