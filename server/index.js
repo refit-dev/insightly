@@ -36,6 +36,35 @@ import cookieParser from 'cookie-parser';
 import jwt from 'jsonwebtoken';
 import Stripe from 'stripe';
 
+function subscriptionPeriod(subscription, field, planItem) {
+  const legacy = Reflect.get(subscription, field);
+  if (typeof legacy === 'number') return legacy;
+  const list = Reflect.get(subscription, 'items');
+  const data = list && typeof list === 'object' ? Reflect.get(list, 'data') : undefined;
+  const items = (Array.isArray(data) ? data : []).filter(
+    (item) => typeof item === 'object' && item !== null,
+  );
+  const periods = new Set(items.map((item) => Reflect.get(item, field)));
+  const chosen = periods.size === 1 ? items[0] : planItem?.(items);
+  const value = chosen ? Reflect.get(chosen, field) : undefined;
+  return typeof value === 'number' ? value : undefined;
+}
+
+function getSubscriptionPeriodEnd(subscription, planItem) {
+  return subscriptionPeriod(subscription, 'current_period_end', planItem);
+}
+
+// The old top-level field when present (old-version payloads), otherwise the new location.
+function getInvoiceSubscription(invoice) {
+  const legacy = Reflect.get(invoice, 'subscription');
+  const parent = Reflect.get(invoice, 'parent');
+  const details =
+    parent && typeof parent === 'object' ? Reflect.get(parent, 'subscription_details') : undefined;
+  const moved =
+    details && typeof details === 'object' ? Reflect.get(details, 'subscription') : undefined;
+  return (legacy !== undefined ? legacy : (moved ?? null));
+}
+
 dotenv.config();
 
 // Minimal Stripe initialization
@@ -44,7 +73,7 @@ const stripeSecretKey = process.env.NODE_ENV === 'production'
   : process.env.STRIPE_TEST_SECRET_KEY;
 
 const stripe = stripeSecretKey
-  ? new Stripe(stripeSecretKey, { apiVersion: '2023-10-16' })
+  ? new Stripe(stripeSecretKey, { apiVersion: '2026-09-30.endive' })
   : null;
 
 const backendUrl = process.env.NODE_ENV === 'production' ? process.env.API_BASE_URL : 'http://localhost:3000';
@@ -98,7 +127,7 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
         stripe_subscription_id: subscription.id,
         stripe_price_id: subscription.items.data[0].price.id,
         stripe_subscription_status: subscription.status,
-        stripe_current_period_end: new Date(subscription.current_period_end * 1000),
+        stripe_current_period_end: new Date((getSubscriptionPeriodEnd(subscription, (items) => items[0])) * 1000),
       };
 
       // Handle scheduled cancellation
@@ -108,7 +137,7 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
           .from('user_subscriptions')
           .update({
             stripe_subscription_status: 'scheduled_for_cancellation',
-            stripe_current_period_end: new Date(subscription.current_period_end * 1000),
+            stripe_current_period_end: new Date((getSubscriptionPeriodEnd(subscription, (items) => items[0])) * 1000),
           })
           .eq('stripe_subscription_id', subscription.id);
         if (updateError) {
@@ -125,7 +154,7 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
           .from('user_subscriptions')
           .update({
             stripe_subscription_status: subscription.status,
-            stripe_current_period_end: new Date(subscription.current_period_end * 1000),
+            stripe_current_period_end: new Date((getSubscriptionPeriodEnd(subscription, (items) => items[0])) * 1000),
           })
           .eq('stripe_subscription_id', subscription.id);
         if (updateError) {
@@ -185,9 +214,9 @@ app.post('/stripe-webhook', express.raw({type: 'application/json'}), async (req,
     }
     case 'invoice.payment_succeeded': {
       const invoice = event.data.object;
-      if (invoice.billing_reason === 'subscription_cycle' && invoice.subscription) {
-        console.log(`✅ Handling invoice.payment_succeeded for subscription: ${invoice.subscription}`);
-        await manageSubscriptionChange(invoice.subscription);
+      if (invoice.billing_reason === 'subscription_cycle' && (getInvoiceSubscription(invoice))) {
+        console.log(`✅ Handling invoice.payment_succeeded for subscription: ${(getInvoiceSubscription(invoice))}`);
+        await manageSubscriptionChange((getInvoiceSubscription(invoice)));
       }
       break;
     }
